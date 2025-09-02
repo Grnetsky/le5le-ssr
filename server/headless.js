@@ -11,7 +11,7 @@ const puppeteer = require("puppeteer");
     });
 
     const page = await browser.newPage();
-    await page.goto("https://192.168.0.20/sender.html");
+    await page.goto("https://127.0.0.1/sender.html");
     setTimeout(async()=>  await page.click("#startBtn"), 3000); // 用 id 选择器
 
     // 在页面里执行屏幕共享

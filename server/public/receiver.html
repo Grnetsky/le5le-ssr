@@ -1,0 +1,496 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>WebRTC Screen Share - Receiver</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            overflow: hidden;
+            background: #000;
+            font-family: Arial, sans-serif;
+        }
+
+        #startBtn {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            padding: 20px 40px;
+            font-size: 18px;
+            background: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+            z-index: 1000;
+        }
+
+        #startBtn:hover {
+            background: #45a049;
+        }
+
+        #remoteVideo {
+            width: 100vw;
+            height: 100vh;
+            object-fit: contain;
+        }
+
+        #controls {
+            position: fixed;
+            top: 10px;
+            right: 10px;
+            background: rgba(0, 0, 0, 0.7);
+            color: white;
+            padding: 10px;
+            border-radius: 5px;
+            font-size: 12px;
+            z-index: 100;
+            display: none;
+        }
+
+        .status-dot {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            margin-right: 5px;
+        }
+
+        .status-connected { background: #4CAF50; }
+        .status-disconnected { background: #f44336; }
+
+        #mouseIndicator {
+            position: fixed;
+            width: 20px;
+            height: 20px;
+            background: rgba(255, 0, 0, 0.7);
+            border: 2px solid #fff;
+            border-radius: 50%;
+            pointer-events: none;
+            z-index: 50;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+<!-- 用户必须先点击这个按钮 -->
+<button id="startBtn">🟢 点击允许接收视频（必须先点我）</button>
+
+<!-- 控制面板 -->
+<div id="controls">
+    <div>
+        <span class="status-dot" id="connectionDot"></span>
+        连接: <span id="connectionStatus">未连接</span>
+    </div>
+    <div>
+        <span class="status-dot" id="mouseDot"></span>
+        鼠标控制: <span id="mouseStatus">未激活</span>
+    </div>
+    <div>发送事件: <span id="eventCount">0</span></div>
+</div>
+
+<!-- 鼠标位置指示器 -->
+<div id="mouseIndicator"></div>
+
+<video
+        id="remoteVideo"
+        playsinline
+        muted
+        style="display: none;">
+</video>
+
+<script>
+    const ws = new WebSocket("wss://192.168.0.20:443");
+    const pc = new RTCPeerConnection();
+    const remoteVideo = document.getElementById("remoteVideo");
+    const startBtn = document.getElementById("startBtn");
+    const controls = document.getElementById("controls");
+    const mouseIndicator = document.getElementById("mouseIndicator");
+
+    let streamSet = false;
+    let dataChannel = null;
+    let mouseControlEnabled = false;
+    let eventCount = 0;
+    let lastMousePosition = { x: 0, y: 0 };
+    let isMouseDown = false;
+
+    // 状态元素
+    const statusElements = {
+        connection: document.getElementById('connectionStatus'),
+        connectionDot: document.getElementById('connectionDot'),
+        mouse: document.getElementById('mouseStatus'),
+        mouseDot: document.getElementById('mouseDot'),
+        eventCount: document.getElementById('eventCount')
+    };
+
+    // 更新连接状态
+    function updateConnectionStatus(connected) {
+        statusElements.connection.textContent = connected ? '已连接' : '未连接';
+        statusElements.connectionDot.className = `status-dot ${connected ? 'status-connected' : 'status-disconnected'}`;
+    }
+
+    // 更新鼠标控制状态
+    function updateMouseStatus(enabled) {
+        mouseControlEnabled = enabled;
+        statusElements.mouse.textContent = enabled ? '已激活' : '未激活';
+        statusElements.mouseDot.className = `status-dot ${enabled ? 'status-connected' : 'status-disconnected'}`;
+    }
+
+    // 更新事件计数
+    function updateEventCount() {
+        eventCount++;
+        statusElements.eventCount.textContent = eventCount;
+    }
+
+    // WebSocket 事件
+    ws.onopen = () => {
+        console.log('WebSocket 连接已建立');
+        updateConnectionStatus(true);
+    };
+
+    ws.onclose = () => {
+        console.log('WebSocket 连接已断开');
+        updateConnectionStatus(false);
+        updateMouseStatus(false);
+    };
+
+    ws.onerror = (error) => {
+        console.error('WebSocket 错误:', error);
+        updateConnectionStatus(false);
+    };
+
+    // 数据通道事件处理
+    pc.ondatachannel = (event) => {
+        dataChannel = event.channel;
+        console.log('接收到数据通道:', dataChannel.label);
+
+        dataChannel.onopen = () => {
+            console.log('数据通道已打开 - 鼠标控制激活');
+            updateMouseStatus(true);
+        };
+
+        dataChannel.onclose = () => {
+            console.log('数据通道已关闭 - 鼠标控制停用');
+            updateMouseStatus(false);
+        };
+
+        dataChannel.onerror = (error) => {
+            console.error('数据通道错误:', error);
+            updateMouseStatus(false);
+        };
+    };
+
+    // 发送鼠标事件到发送端
+    function sendMouseEvent(eventData) {
+        if (dataChannel && dataChannel.readyState === 'open' && mouseControlEnabled) {
+            try {
+                dataChannel.send(JSON.stringify(eventData));
+                updateEventCount();
+                console.log('发送鼠标事件:', eventData.type, eventData.x, eventData.y);
+            } catch (e) {
+                console.error('发送鼠标事件失败:', e);
+            }
+        }
+    }
+
+    // 获取相对于视频的坐标
+    function getVideoRelativeCoordinates(clientX, clientY) {
+        const videoRect = remoteVideo.getBoundingClientRect();
+        const videoAspectRatio = remoteVideo.videoWidth / remoteVideo.videoHeight;
+        const containerAspectRatio = videoRect.width / videoRect.height;
+
+        let videoDisplayWidth, videoDisplayHeight;
+        let offsetX = 0, offsetY = 0;
+
+        if (containerAspectRatio > videoAspectRatio) {
+            // 容器更宽，视频在垂直方向填满
+            videoDisplayHeight = videoRect.height;
+            videoDisplayWidth = videoDisplayHeight * videoAspectRatio;
+            offsetX = (videoRect.width - videoDisplayWidth) / 2;
+        } else {
+            // 容器更高，视频在水平方向填满
+            videoDisplayWidth = videoRect.width;
+            videoDisplayHeight = videoDisplayWidth / videoAspectRatio;
+            offsetY = (videoRect.height - videoDisplayHeight) / 2;
+        }
+
+        // 计算相对于实际视频内容的坐标
+        const relativeX = (clientX - videoRect.left - offsetX) / videoDisplayWidth;
+        const relativeY = (clientY - videoRect.top - offsetY) / videoDisplayHeight;
+
+        // 转换为发送端屏幕坐标 (假设发送端分辨率)
+        const screenX = Math.round(relativeX * (remoteVideo.videoWidth || 1920));
+        const screenY = Math.round(relativeY * (remoteVideo.videoHeight || 1080));
+
+        return { x: screenX, y: screenY };
+    }
+
+    // 更新鼠标指示器位置
+    function updateMouseIndicator(clientX, clientY) {
+        mouseIndicator.style.left = (clientX - 10) + 'px';
+        mouseIndicator.style.top = (clientY - 10) + 'px';
+        mouseIndicator.style.display = 'block';
+    }
+
+    // 鼠标事件处理
+    function setupMouseEvents() {
+        // 鼠标移动
+        remoteVideo.addEventListener('mousemove', (e) => {
+            if (!mouseControlEnabled) return;
+
+            const coords = getVideoRelativeCoordinates(e.clientX, e.clientY);
+            lastMousePosition = coords;
+
+            updateMouseIndicator(e.clientX, e.clientY);
+
+            sendMouseEvent({
+                type: 'mousemove',
+                x: coords.x,
+                y: coords.y,
+                timestamp: Date.now()
+            });
+        });
+
+        // 鼠标按下
+        remoteVideo.addEventListener('mousedown', (e) => {
+            if (!mouseControlEnabled) return;
+            e.preventDefault();
+
+            isMouseDown = true;
+            const coords = getVideoRelativeCoordinates(e.clientX, e.clientY);
+
+            sendMouseEvent({
+                type: 'mousedown',
+                x: coords.x,
+                y: coords.y,
+                button: e.button,
+                timestamp: Date.now()
+            });
+        });
+
+        // 鼠标松开
+        remoteVideo.addEventListener('mouseup', (e) => {
+            if (!mouseControlEnabled) return;
+            e.preventDefault();
+
+            isMouseDown = false;
+            const coords = getVideoRelativeCoordinates(e.clientX, e.clientY);
+
+            sendMouseEvent({
+                type: 'mouseup',
+                x: coords.x,
+                y: coords.y,
+                button: e.button,
+                timestamp: Date.now()
+            });
+        });
+
+        // 鼠标点击
+        remoteVideo.addEventListener('click', (e) => {
+            if (!mouseControlEnabled) return;
+            e.preventDefault();
+
+            const coords = getVideoRelativeCoordinates(e.clientX, e.clientY);
+
+            sendMouseEvent({
+                type: 'click',
+                x: coords.x,
+                y: coords.y,
+                button: e.button,
+                timestamp: Date.now()
+            });
+        });
+
+        // 右键菜单
+        remoteVideo.addEventListener('contextmenu', (e) => {
+            if (!mouseControlEnabled) return;
+            e.preventDefault();
+
+            const coords = getVideoRelativeCoordinates(e.clientX, e.clientY);
+
+            sendMouseEvent({
+                type: 'contextmenu',
+                x: coords.x,
+                y: coords.y,
+                timestamp: Date.now()
+            });
+        });
+
+        // 鼠标滚轮
+        remoteVideo.addEventListener('wheel', (e) => {
+            if (!mouseControlEnabled) return;
+            e.preventDefault();
+
+            const coords = getVideoRelativeCoordinates(e.clientX, e.clientY);
+
+            sendMouseEvent({
+                type: 'wheel',
+                x: coords.x,
+                y: coords.y,
+                deltaX: e.deltaX,
+                deltaY: e.deltaY,
+                deltaZ: e.deltaZ,
+                timestamp: Date.now()
+            });
+        });
+
+        // 双击
+        remoteVideo.addEventListener('dblclick', (e) => {
+            if (!mouseControlEnabled) return;
+            e.preventDefault();
+
+            const coords = getVideoRelativeCoordinates(e.clientX, e.clientY);
+
+            sendMouseEvent({
+                type: 'dblclick',
+                x: coords.x,
+                y: coords.y,
+                button: e.button,
+                timestamp: Date.now()
+            });
+        });
+
+        // 鼠标离开视频区域
+        remoteVideo.addEventListener('mouseleave', () => {
+            mouseIndicator.style.display = 'none';
+        });
+
+        // 键盘事件（可选）
+        document.addEventListener('keydown', (e) => {
+            if (!mouseControlEnabled || document.activeElement !== remoteVideo) return;
+
+            sendMouseEvent({
+                type: 'keydown',
+                key: e.key,
+                code: e.code,
+                ctrlKey: e.ctrlKey,
+                shiftKey: e.shiftKey,
+                altKey: e.altKey,
+                metaKey: e.metaKey,
+                timestamp: Date.now()
+            });
+        });
+
+        document.addEventListener('keyup', (e) => {
+            if (!mouseControlEnabled || document.activeElement !== remoteVideo) return;
+
+            sendMouseEvent({
+                type: 'keyup',
+                key: e.key,
+                code: e.code,
+                ctrlKey: e.ctrlKey,
+                shiftKey: e.shiftKey,
+                altKey: e.altKey,
+                metaKey: e.metaKey,
+                timestamp: Date.now()
+            });
+        });
+    }
+
+    // 开始按钮点击
+    startBtn.onclick = () => {
+        startBtn.style.display = "none";
+        remoteVideo.style.display = "block";
+        controls.style.display = "block";
+
+        // 设置视频可获得焦点以接收键盘事件
+        remoteVideo.setAttribute('tabindex', '0');
+        remoteVideo.focus();
+
+        // 如果已经有流了，立即播放
+        if (streamSet && remoteVideo.srcObject) {
+            remoteVideo.play().then(() => {
+                console.log("视频播放成功");
+            }).catch(e => {
+                console.error("播放失败:", e);
+            });
+        }
+    };
+
+    // 当收到远程流时
+    pc.ontrack = (event) => {
+        const stream = event.streams[0];
+        console.log("收到远程流:", stream);
+
+        remoteVideo.srcObject = stream;
+        streamSet = true;
+
+        // 如果用户已经点击过按钮，可以自动播放
+        if (startBtn.style.display === "none") {
+            remoteVideo.play().then(() => {
+                console.log("视频自动播放成功");
+            }).catch(e => {
+                console.error("自动播放失败:", e);
+            });
+        } else {
+            console.warn("用户还没点击，等待用户点击...");
+        }
+    };
+
+    // 信令逻辑
+    pc.onicecandidate = (event) => {
+        if (event.candidate) {
+            ws.send(JSON.stringify({ type: "candidate", candidate: event.candidate }));
+        }
+    };
+
+    ws.onmessage = async (event) => {
+        const data = event.data;
+        let message;
+        try {
+            if (typeof data === 'string') {
+                message = JSON.parse(data);
+            } else if (data instanceof Blob) {
+                const text = await new Promise(r => {
+                    const reader = new FileReader();
+                    reader.onload = () => r(reader.result);
+                    reader.readAsText(data);
+                });
+                message = JSON.parse(text);
+            } else {
+                return;
+            }
+        } catch (e) {
+            console.error("解析消息失败:", e);
+            return;
+        }
+
+        try {
+            if (message.type === "offer") {
+                await pc.setRemoteDescription(new RTCSessionDescription({
+                    type: message.type,
+                    sdp: message.sdp
+                }));
+                const answer = await pc.createAnswer();
+                await pc.setLocalDescription(answer);
+                ws.send(JSON.stringify({ type: "answer", sdp: answer.sdp }));
+            } else if (message.type === "candidate") {
+                await pc.addIceCandidate(new RTCIceCandidate(message.candidate));
+            }
+        } catch (e) {
+            console.error("处理信令失败:", e);
+        }
+    };
+
+    // 初始化鼠标事件
+    setupMouseEvents();
+
+    // 连接状态监控
+    pc.onconnectionstatechange = () => {
+        console.log('PeerConnection 状态:', pc.connectionState);
+        updateConnectionStatus(pc.connectionState === 'connected');
+    };
+
+    pc.oniceconnectionstatechange = () => {
+        console.log('ICE 连接状态:', pc.iceConnectionState);
+    };
+
+</script>
+</body>
+</html>

@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>WebRTC Screen Share - Sender</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+        }
+        .control-panel {
+            margin-bottom: 20px;
+        }
+        .status {
+            background: #f0f0f0;
+            padding: 10px;
+            border-radius: 5px;
+            margin: 10px 0;
+        }
+        .log {
+            height: 200px;
+            overflow-y: auto;
+            background: #000;
+            color: #00ff00;
+            padding: 10px;
+            font-family: monospace;
+            white-space: pre-wrap;
+        }
+        button {
+            padding: 10px 20px;
+            margin: 5px;
+            font-size: 14px;
+        }
+        #mouse {
+            width: 20px;
+            height: 20px;
+            background: #dd2525;
+            position: absolute;
+            top: 0;
+            left: 0;
+            border-radius: 100px;
+        }
+        #meta2d {
+            width: 100vw;
+            height: 100vh;
+        }
+    </style>
+</head>
+<body>
+<div id="mouse"></div>
+<h2>📹 Sender (Screen Share with Mouse Control)</h2>
+
+<div class="control-panel">
+    <button id="startBtn">开始共享屏幕</button>
+    <button id="stopBtn" disabled>停止共享</button>
+</div>
+
+<div class="status">
+    <div>连接状态: <span id="connectionStatus">未连接</span></div>
+    <div>共享状态: <span id="shareStatus">未开始</span></div>
+    <div>鼠标控制: <span id="mouseStatus">未激活</span></div>
+</div>
+
+<div class="log" id="logArea" onclick="alert(1)"></div>
+<div id="meta2d"></div>
+<script src="https://cdn.jsdelivr.net/npm/meta2d.js@1.0.95-alpha.1/meta2d.min.js"></script>
+<script>
+    const contan = document.querySelector('#meta2d');
+    const meta2d = new Meta2d(contan);
+    fetch('./1.json').then(res => res.json()).then(data => {
+        meta2d.open(data)
+    })
+</script>
+<script>
+    const ws = new WebSocket("wss://192.168.0.20:443");
+    const pc = new RTCPeerConnection();
+    const dataChannel = pc.createDataChannel("mouseControl");
+
+    let stream;
+    let isSharing = false;
+    let mouseControlEnabled = false;
+
+    const statusElements = {
+        connection: document.getElementById('connectionStatus'),
+        share: document.getElementById('shareStatus'),
+        mouse: document.getElementById('mouseStatus')
+    };
+
+    const logArea = document.getElementById('logArea');
+
+    // 日志记录函数
+    function log(message) {
+        const timestamp = new Date().toLocaleTimeString();
+        logArea.textContent += `[${timestamp}] ${message}\n`;
+        logArea.scrollTop = logArea.scrollHeight;
+        console.log(message);
+    }
+
+    // WebSocket 连接事件
+    ws.onopen = () => {
+        statusElements.connection.textContent = '已连接';
+        statusElements.connection.style.color = 'green';
+        log('WebSocket 连接已建立');
+    };
+
+    ws.onclose = () => {
+        statusElements.connection.textContent = '已断开';
+        statusElements.connection.style.color = 'red';
+        log('WebSocket 连接已断开');
+    };
+
+    ws.onerror = (error) => {
+        log('WebSocket 错误: ' + error);
+    };
+
+    // RTCPeerConnection 事件
+    pc.onconnectionstatechange = () => {
+        log(`PeerConnection 状态: ${pc.connectionState}`);
+    };
+
+    pc.oniceconnectionstatechange = () => {
+        log(`ICE 连接状态: ${pc.iceConnectionState}`);
+    };
+
+    // 发送 ICE 候选
+    pc.onicecandidate = (event) => {
+        if (event.candidate) {
+            ws.send(JSON.stringify({
+                type: "candidate",
+                candidate: event.candidate
+            }));
+            log('发送 ICE 候选');
+        }
+    };
+
+    // DataChannel 事件处理
+    dataChannel.onopen = () => {
+        log('数据通道已打开 - 鼠标控制激活');
+        mouseControlEnabled = true;
+        statusElements.mouse.textContent = '已激活';
+        statusElements.mouse.style.color = 'green';
+    };
+
+    dataChannel.onclose = () => {
+        log('数据通道已关闭 - 鼠标控制停用');
+        mouseControlEnabled = false;
+        statusElements.mouse.textContent = '未激活';
+        statusElements.mouse.style.color = 'red';
+    };
+
+    dataChannel.onerror = (error) => {
+        log('数据通道错误: ' + error);
+    };
+
+    // 接收来自远端的鼠标控制命令
+    dataChannel.onmessage = (event) => {
+        try {
+            const data = JSON.parse(event.data);
+            handleRemoteMouseEvent(data);
+        } catch (e) {
+            log('解析鼠标控制数据失败: ' + e);
+        }
+    };
+
+
+    // 处理远程鼠标事件
+    function handleRemoteMouseEvent(data) {
+        // log(`收到鼠标事件: ${data.type} (${data.x}, ${data.y})`);
+
+        const {x,y,button} = data;
+        simulateMouseMove(x, y);
+        const mouseEvent = new MouseEvent(data.type, {
+            view: window,
+            bubbles: true,
+            cancelable: true,
+            clientX: x,
+            clientY: y,
+            button: button
+        });
+
+        // 在目标元素上触发点击（或直接 dispatch 到 document）
+        const target = document.elementFromPoint(x, y) || document.body;
+        console.log(data.type,target)
+
+        target.dispatchEvent(mouseEvent);
+        // switch(data.type) {
+        //     case 'mousemove':
+        //         // 模拟鼠标移动
+        //         const {x,y,button} = data;
+        //         simulateMouseMove(x, y);
+        //         const mouseEvent = new MouseEvent('mousemove', {
+        //             view: window,
+        //             bubbles: true,
+        //             cancelable: true,
+        //             clientX: x,
+        //             clientY: y,
+        //             button: button
+        //         });
+        //
+        //         // 在目标元素上触发点击（或直接 dispatch 到 document）
+        //         const target = document.elementFromPoint(x, y) || document.body;
+        //         target.dispatchEvent(mouseEvent);
+        //         break;
+        //     case 'mousedown':
+        //         // 模拟鼠标按下
+        //         simulateMouseDown(data.x, data.y, data.button);
+        //         break;
+        //     case 'mouseup':
+        //         // 模拟鼠标松开
+        //         simulateMouseUp(data.x, data.y, data.button);
+        //         break;
+        //     case 'click':
+        //         // 模拟鼠标点击
+        //         simulateMouseClick(data.x, data.y, data.button);
+        //         break;
+        //     case 'wheel':
+        //         // 模拟鼠标滚轮
+        //         simulateMouseWheel(data.x, data.y, data.deltaX, data.deltaY);
+        //         break;
+        // }
+    }
+
+    // 鼠标事件模拟函数（浏览器环境下的替代方案）
+    function simulateMouseMove(x, y) {
+        // 在实际应用中，这里需要调用系统API
+        const mouse = document.getElementById('mouse');
+        mouse.style.left = x + 'px';
+        mouse.style.top = y + 'px';
+    }
+
+    function simulateMouseDown(x, y, button) {
+        log(`模拟鼠标按下: (${x}, ${y}) 按钮: ${button}`);
+    }
+
+    function simulateMouseUp(x, y, button) {
+        log(`模拟鼠标松开: (${x}, ${y}) 按钮: ${button}`);
+    }
+
+    function simulateMouseClick(x, y, button) {
+        log(`模拟鼠标点击: (${x}, ${y}) 按钮: ${button}`);
+    }
+
+    function simulateMouseWheel(x, y, deltaX, deltaY) {
+        log(`模拟鼠标滚轮: (${x}, ${y}) 滚动: (${deltaX}, ${deltaY})`);
+    }
+
+    // 键盘事件处理（可选功能）
+    function handleKeyboardEvent(data) {
+        log(`收到键盘事件: ${data.type} 键: ${data.key}`);
+        // 模拟键盘事件
+    }
+
+    // 接收信令
+    ws.onmessage = async (msg) => {
+        const _data = msg.data;
+        let data;
+        try {
+            if (typeof _data === 'string') {
+                data = JSON.parse(_data);
+            } else if (_data instanceof Blob) {
+                const text = await new Promise(r => {
+                    const reader = new FileReader();
+                    reader.onload = () => r(reader.result);
+                    reader.readAsText(_data);
+                });
+                data = JSON.parse(text);
+            } else {
+                return;
+            }
+        } catch (e) {
+            log("解析消息失败: " + e);
+            return;
+        }
+
+        if (data.type === "answer") {
+            await pc.setRemoteDescription(new RTCSessionDescription({
+                type: data.type,
+                sdp: data.sdp
+            }));
+            log('接收到 Answer，设置远程描述');
+        } else if (data.type === "candidate") {
+            try {
+                await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
+                log('添加 ICE 候选成功');
+            } catch(e) {
+                log("添加 ICE 候选失败: " + e);
+            }
+        }
+    };
+
+    // 开始屏幕共享
+    document.getElementById("startBtn").onclick = async () => {
+        try {
+            const constraints = {
+                video: { // 4k
+                    width: { max: 4096 },
+                    height: { max: 2460 },
+                    frameRate: { max: 50 }
+                },
+                audio: false
+            };
+
+            stream = await navigator.mediaDevices.getDisplayMedia(constraints);
+
+            // 添加所有 track
+            stream.getTracks().forEach(track => pc.addTrack(track, stream));
+
+            // 监听流结束事件
+            stream.getVideoTracks()[0].addEventListener('ended', () => {
+                log('屏幕共享已停止');
+                stopSharing();
+            });
+
+            // 创建 offer
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+
+            // 发送 offer
+            ws.send(JSON.stringify({
+                type: offer.type,
+                sdp: offer.sdp
+            }));
+
+            isSharing = true;
+            statusElements.share.textContent = '共享中';
+            statusElements.share.style.color = 'green';
+            document.getElementById('startBtn').disabled = true;
+            document.getElementById('stopBtn').disabled = false;
+
+            log('开始屏幕共享，发送 Offer');
+
+        } catch (err) {
+            log("屏幕共享失败: " + err);
+        }
+    };
+
+    // 停止屏幕共享
+    document.getElementById("stopBtn").onclick = stopSharing;
+
+    function stopSharing() {
+        if (stream) {
+            stream.getTracks().forEach(track => track.stop());
+            stream = null;
+        }
+
+        if (pc) {
+            pc.close();
+        }
+
+        isSharing = false;
+        mouseControlEnabled = false;
+        statusElements.share.textContent = '已停止';
+        statusElements.share.style.color = 'red';
+        statusElements.mouse.textContent = '未激活';
+        statusElements.mouse.style.color = 'red';
+        document.getElementById('startBtn').disabled = false;
+        document.getElementById('stopBtn').disabled = true;
+
+        log('屏幕共享已停止');
+    }
+
+    // 发送心跳保持连接
+    setInterval(() => {
+        if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'ping' }));
+        }
+    }, 30000);
+
+</script>
+
+</body>
+</html>
